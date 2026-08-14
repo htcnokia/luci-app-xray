@@ -118,15 +118,28 @@ jobs:
           echo "=== Compiled APK Files ==="
           find "$SDK_HOME/bin/" -type f -name "*.apk" -exec ls -lh {} \;
 
-      - name: Collect Artifacts
+      - name: Collect and Zip Artifacts
         run: |
           mkdir -p "${{ github.workspace }}/output"
-          # 遞迴搜尋所有產出的 .apk 檔並複製出來，同時加上架構標籤
-          find "$SDK_HOME/bin/" -type f -name "*.apk" | while read -r f; do
+          
+          # 1. 建立一個臨時目錄存放當前架構的所有 apk
+          ARCH_DIR="${{ github.workspace }}/xray-apk-${{ matrix.id }}"
+          mkdir -p "$ARCH_DIR"
+          
+          # 2. 複製所有 apk 到該目錄
+          find "$SDK_HOME/bin/" -type f -name "*.apk" -exec cp {} "$ARCH_DIR/" \;
+          
+          # 3. 將整個目錄打包成 ZIP 壓縮檔
+          cd "${{ github.workspace }}"
+          zip -r "output/xray-apk-packages-${{ matrix.id }}.zip" "xray-apk-${{ matrix.id }}"
+          
+          # 4. 同時單獨複製一份 luci-app-xray 和 xray-core 的 apk 出來 (方便想單獨下載的人)
+          find "$ARCH_DIR" -type f \( -name "luci-app-xray*.apk" -o -name "xray-core*.apk" \) | while read -r f; do
             base="$(basename "$f")"
             cp "$f" "${{ github.workspace }}/output/${base%.*}-${{ matrix.id }}.${base##*.}"
           done
-          echo "=== All Output APKs ==="
+          
+          echo "=== 最終輸出的打包檔案 ==="
           ls -lh "${{ github.workspace }}/output"
 
       - name: Generate Tag Name
@@ -143,6 +156,10 @@ jobs:
         with:
           tag_name: ${{ steps.tag_gen.outputs.tag_name }}
           name: "ImmortalWrt SNAPSHOT APK Release ${{ steps.tag_gen.outputs.tag_name }}"
-          files: output/*.apk
+          # 這裡只發布 zip 包和核心 apk
+          files: |
+            output/*.zip
+            output/luci-app-xray*.apk
+            output/xray-core*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
