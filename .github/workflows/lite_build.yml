@@ -73,31 +73,38 @@ jobs:
       - name: Update Feeds & Prepare Packages
         run: |
           cd "$SDK_HOME"
+          
+          # 1. 更新 Feeds 并清理可能冲突的同名包
           ./scripts/feeds update -a
+          rm -rf feeds/luci/applications/luci-app-xray
+          rm -rf feeds/packages/net/luci-app-xray
           
-          # 1. 強行建立 package 連結
-          rm -rf package/$PACKAGE_NAME
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          # 2. 拷贝源码到 package/luci-app-xray
+          rm -rf "package/$PACKAGE_NAME"
+          mkdir -p "package/$PACKAGE_NAME"
+          cp -r "${{ github.workspace }}"/* "package/$PACKAGE_NAME/"
           
-          # 2. 安裝所有 feeds 條目
+          # 3. 检查并纠正 Makefile 嵌套路径（关键修复！）
+          if [ ! -f "package/$PACKAGE_NAME/Makefile" ] && [ -f "package/$PACKAGE_NAME/applications/luci-app-xray/Makefile" ]; then
+              echo "[+] 检测到子目录嵌套，正在平铺 Makefile 结构..."
+              cp -r package/$PACKAGE_NAME/applications/luci-app-xray/* package/$PACKAGE_NAME/
+          fi
+          
+          # 确认 Makefile 位置
+          if [ -f "package/$PACKAGE_NAME/Makefile" ]; then
+              echo "✅ 成功确认 package/$PACKAGE_NAME/Makefile 存在！"
+          else
+              echo "❌ 警告: package/$PACKAGE_NAME/ 目录下未找到 Makefile，请检查仓库结构！"
+              ls -la "package/$PACKAGE_NAME/"
+          fi
+          
+          # 4. 安装 Feeds & 清理 Docker 冲突
           ./scripts/feeds install -a
-          
-          # 3. 清理 Docker 衝突
           rm -rf feeds/packages/utils/dockerd
           rm -rf feeds/packages/utils/docker
           rm -rf feeds/packages/utils/containerd
 
-          # 4. 🔥 雙重注入：強制寫入 private.txt 配置（使用 =y）
-          cat <<EOF >> .config
-          # =========================================================
-          # Config: yichya/luci-app-xray + 瘦身版 Xray-Core
-          # =========================================================
-          CONFIG_PACKAGE_xray-core=y
-          CONFIG_PACKAGE_luci-app-xray=y
-          CONFIG_PACKAGE_luci-i18n-xray-zh-cn=y
-          EOF
-
-          # 5. 注入 UPX 瘦身邏輯
+          # 5. 注入 UPX 瘦身到 xray-core
           XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
               echo "[+] 注入 UPX 到: $xmk"
@@ -110,26 +117,28 @@ jobs:
         run: |
           cd "$SDK_HOME"
           
-          # 先 make defconfig 展開依賴
+          # 1. 写入配置并刷新
+          echo "CONFIG_PACKAGE_luci-app-xray=m" > .config
+          echo "CONFIG_PACKAGE_xray-core=m" >> .config
           make defconfig
           
-          # 再次確保配置沒被 defconfig 沖刷掉
-          echo "CONFIG_PACKAGE_luci-app-xray=y" >> .config
-          echo "CONFIG_PACKAGE_xray-core=y" >> .config
+          # 2. 编译 xray-core
+          echo "=== 开始编译 xray-core ==="
+          make package/xray-core/compile V=s
           
-          # 🔥 顯式強制編譯目標：直接對 package 下的 Makefile 發起 compile
-          echo "=== 開始強制編譯 luci-app-xray 及依賴 ==="
+          # 3. 编译 luci-app-xray
+          echo "=== 开始编译 luci-app-xray ==="
           make package/$PACKAGE_NAME/compile V=s
-          make package/xray-core/compile V=s || true
           
-          # 強效 UPX 壓縮（在 build_dir 尋找 binary 進行補刀）
+          # 4. 补刀 UPX 瘦身（如果在 build_dir 找到二进位）
           find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
-              echo "[+] 強行 UPX 瘦身: $xbin"
+              echo "[+] 补刀 UPX 瘦身: $xbin"
               upx --fast "$xbin" || true
           done
           
-          echo "=== SDK bin 目錄下的所有 APK 檔案 ==="
+          echo "=== 检查 SDK bin 目录下编译出的所有 APK ==="
           find bin/ -type f -name "*.apk" -exec ls -lh {} \;
+
 
       - name: Collect and Zip Artifacts
         run: |
