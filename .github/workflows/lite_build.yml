@@ -75,21 +75,29 @@ jobs:
           cd "$SDK_HOME"
           ./scripts/feeds update -a
           
-          # 1. 將目前倉庫 (luci-app-xray) 放入 package 目錄
+          # 1. 強行建立 package 連結
+          rm -rf package/$PACKAGE_NAME
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          
+          # 2. 安裝所有 feeds 條目
           ./scripts/feeds install -a
           
-          # 2. 清理會干擾編譯的無用套件 (避免 Docker/dockerd 報錯)
+          # 3. 清理 Docker 衝突
           rm -rf feeds/packages/utils/dockerd
           rm -rf feeds/packages/utils/docker
           rm -rf feeds/packages/utils/containerd
-          
-          # 3. 🔥 關鍵修復：強制在 .config 中啟用 luci-app-xray 與 xray-core 的編譯選項！
-          echo "CONFIG_PACKAGE_luci-app-xray=m" >> .config
-          echo "CONFIG_PACKAGE_xray-core=m" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-xray-zh-cn=m" >> .config || true
-          
-          # 4. 搜尋並注入 UPX 瘦身指令到 xray-core
+
+          # 4. 🔥 雙重注入：強制寫入 private.txt 配置（使用 =y）
+          cat <<EOF >> .config
+          # =========================================================
+          # Config: yichya/luci-app-xray + 瘦身版 Xray-Core
+          # =========================================================
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_luci-app-xray=y
+          CONFIG_PACKAGE_luci-i18n-xray-zh-cn=y
+          EOF
+
+          # 5. 注入 UPX 瘦身邏輯
           XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
               echo "[+] 注入 UPX 到: $xmk"
@@ -101,24 +109,27 @@ jobs:
       - name: Build APK Packages
         run: |
           cd "$SDK_HOME"
+          
+          # 先 make defconfig 展開依賴
           make defconfig
           
-          # 1. 正常編譯套件
-          make package/${PACKAGE_NAME}/compile V=s -i || true
-          make package/xray-core/compile V=s -i || true
+          # 再次確保配置沒被 defconfig 沖刷掉
+          echo "CONFIG_PACKAGE_luci-app-xray=y" >> .config
+          echo "CONFIG_PACKAGE_xray-core=y" >> .config
           
-          # 2. 強效 UPX 瘦身：尋找 SDK 編譯出來的所有 xray 二進位檔並直接壓縮
-          echo "=== 正在執行強效 UPX 瘦身 ==="
+          # 🔥 顯式強制編譯目標：直接對 package 下的 Makefile 發起 compile
+          echo "=== 開始強制編譯 luci-app-xray 及依賴 ==="
+          make package/$PACKAGE_NAME/compile V=s
+          make package/xray-core/compile V=s || true
+          
+          # 強效 UPX 壓縮（在 build_dir 尋找 binary 進行補刀）
           find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
-              echo "[+] 發現 Xray 二進位檔: $xbin"
-              upx --fast --force-macos "$xbin" || upx --fast "$xbin" || true
+              echo "[+] 強行 UPX 瘦身: $xbin"
+              upx --fast "$xbin" || true
           done
           
-          # 3. 重新打包/更新 APK（如果 SDK 支援）或者二次觸發打包
-          make package/xray-core/compile V=s -i || true
-
-          echo "=== Compiled APK Files ==="
-          find "$SDK_HOME/bin/" -type f -name "*.apk" -exec ls -lh {} \;
+          echo "=== SDK bin 目錄下的所有 APK 檔案 ==="
+          find bin/ -type f -name "*.apk" -exec ls -lh {} \;
 
       - name: Collect and Zip Artifacts
         run: |
