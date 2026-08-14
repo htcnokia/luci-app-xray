@@ -59,7 +59,7 @@ jobs:
           tar -C "$SDK_HOME" --strip-components=1 -xf "$SDK_FILE"
           rm -f "$SDK_FILE" sha256sums
 
-      - name: Setup Feeds, GeoData & Clone Chinese i18n
+      - name: Setup Feeds & Fix Dependency Bugs
         run: |
           cd "$SDK_HOME"
           
@@ -69,18 +69,21 @@ jobs:
           # 2. 更新 feeds 列表
           ./scripts/feeds update -a
           
-          # 3. 安裝 luci-app-xray、status 狀態組件及 GeoData 數據庫
+          # 3. 🔥 關鍵修復：刪除引發 循環依賴 (recursive dependency) 的 asterisk 相關套件
+          rm -rf feeds/telephony/net/asterisk*
+          rm -rf feeds/packages/net/asterisk*
+          
+          # 4. 安裝 luci-app-xray、status 狀態組件及 GeoData 數據庫
           ./scripts/feeds install luci-app-xray luci-app-xray-status
-          ./scripts/feeds install v2ray-geoip v2ray-geosite || ./scripts/feeds install geodata
+          ./scripts/feeds install v2ray-geoip v2ray-geosite || ./scripts/feeds install geodata || true
           
-          # 4. 拉取中文語言包 Repo 並安裝
+          # 5. 拉取中文語言包 Repo 並安裝
           git clone -b main --depth=1 https://github.com/htcnokia/luci-i18n-xray-zh-cn package/luci-i18n-xray-zh-cn
-          ./scripts/feeds install -a
           
-          # 5. 清理潛在的 Docker 依賴衝突
+          # 6. 清理潛在的 Docker 依賴衝突
           rm -rf feeds/packages/utils/dockerd feeds/packages/utils/docker feeds/packages/utils/containerd
 
-          # 6. 注入 UPX 瘦身指令到 xray-core Makefile
+          # 7. 注入 UPX 瘦身指令到 xray-core Makefile
           XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
               echo "[+] 注入 UPX 瘦身到: $xmk"
@@ -101,14 +104,17 @@ jobs:
           echo "CONFIG_PACKAGE_v2ray-geoip=m" >> .config
           echo "CONFIG_PACKAGE_v2ray-geosite=m" >> .config
           
+          # 執行 defconfig 刷新配置
           make defconfig
           
           # 開始編譯所有目標套件
           echo "=== 開始編譯目標套件 ==="
-          make package/feeds/luci_app_xray/luci-app-xray/compile V=s
+          
+          # 使用 make package/.../compile 的全域搜尋機制，避免路徑匹配失誤
+          make package/luci-app-xray/compile V=s || make package/feeds/luci_app_xray/luci-app-xray/compile V=s
           make package/luci-i18n-xray-zh-cn/compile V=s || true
-          make package/feeds/packages/v2ray-geoip/compile V=s || true
-          make package/feeds/packages/v2ray-geosite/compile V=s || true
+          make package/v2ray-geoip/compile V=s || true
+          make package/v2ray-geosite/compile V=s || true
           
           # 補刀二次強效 UPX 壓縮，確保二進位體積最小
           find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
