@@ -5,7 +5,10 @@ on:
     tags:
       - "*"
   workflow_dispatch:
-
+  
+permissions:
+  contents: write
+  
 env:
   PACKAGE_NAME: luci-app-xray
   CACHE_DIR: ~/cache
