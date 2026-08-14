@@ -1,4 +1,4 @@
-name: Build and Release for ZN M2
+name: Build APK for ZN M2 & x86_64 (ImmortalWrt)
 
 on:
   push:
@@ -12,26 +12,22 @@ env:
 
 jobs:
   release:
-    name: Build for ${{ matrix.arch }} (${{ matrix.id }})
+    name: Build APK (${{ matrix.id }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ZN M2 (IPQ60xx) 專屬 OpenWrt 23.05 SDK
-          - id: 23.05-ipq60xx
+          # ZN M2 (qualcommax/ipq60xx) - ImmortalWrt SNAPSHOT (APK)
+          - id: immortalwrt-ipq60xx
             arch: aarch64_cortex-a53
-            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/qualcommax/ipq60xx
-            sdk_name: -sdk-23.05.5-qualcommax-ipq60xx_
-          # ZN M2 (IPQ60xx) 專屬 OpenWrt 25.12 SDK (最新版)
-          - id: 25.12-ipq60xx
-            arch: aarch64_cortex-a53
-            sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/qualcommax/ipq60xx
-            sdk_name: -sdk-25.12.2-qualcommax-ipq60xx_
+            base_url: https://downloads.immortalwrt.org/snapshots/targets/qualcommax/ipq60xx
+          # x86_64 - ImmortalWrt SNAPSHOT (APK)
+          - id: immortalwrt-x86_64
+            arch: x86_64
+            base_url: https://downloads.immortalwrt.org/snapshots/targets/x86/64
 
     env:
-      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_name }}
       CCACHE_DIR: ~/.ccache
       CONFIG_CCACHE: y
 
@@ -39,117 +35,96 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Cache Key
-        id: cache_key
-        run: echo "timestamp=$(date +%s)" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CACHE_DIR }}
-            ${{ env.CCACHE_DIR }}
-          key: openwrt-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
-          restore-keys: |
-            openwrt-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-
-
       - name: Install Dependencies & UPX
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc zstd upx-ucl
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc zstd upx-ucl curl
 
-      - name: Create Directories
+      - name: Download & Extract ImmortalWrt SDK
         run: |
-          CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
-          CACHE_DIR_DL="$(eval echo "$CACHE_DIR/dl")"
-          CACHE_DIR_FEEDS="$(eval echo "$CACHE_DIR/feeds")"
-          mkdir -p "$CACHE_DIR_SDK" "$CACHE_DIR_DL" "$CACHE_DIR_FEEDS"
-          echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
-          echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
-          echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
-          echo "SDK_HOME=$(mktemp -d)" >> $GITHUB_ENV
-
-      - name: Download and Unzip SDK
-        run: |
-          cd "$CACHE_DIR_SDK"
-          if ! ( wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -- "$SDK_NAME" > sha256sums.small 2>/dev/null ) ; then
-            echo "::error::Can not find ${SDK_NAME} file in sha256sums."
+          SDK_HOME=$(mktemp -d)
+          echo "SDK_HOME=$SDK_HOME" >> $GITHUB_ENV
+          
+          BASE_URL="${{ matrix.base_url }}"
+          echo "Fetching sha256sums from ${BASE_URL}..."
+          curl -sL "${BASE_URL}/sha256sums" -o sha256sums
+          
+          # 動態匹配包含 -sdk- 的完整檔案名稱 (支持 .tar.xz / .tar.zst)
+          SDK_FILE=$(grep -oE "immortalwrt-sdk-[^ ]+\.tar\.(xz|zst)" sha256sums | head -n 1)
+          if [ -z "$SDK_FILE" ]; then
+            # 若 ImmortalWrt 命名格式不同，降級搜尋 openwrt-sdk
+            SDK_FILE=$(grep -oE "openwrt-sdk-[^ ]+\.tar\.(xz|zst)" sha256sums | head -n 1)
+          fi
+          
+          if [ -z "$SDK_FILE" ]; then
+            echo "::error::Cannot find SDK file in sha256sums at ${BASE_URL}"
             exit 1
           fi
-          SDK_FILE="$(cat sha256sums.small | cut -d' ' -f2 | sed 's/*//g')"
-          if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
-            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
-            if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
-              echo "::error::SDK can not be verified!"
-              exit 1
-            fi
-          fi
-          cd -
-          tar -C "$SDK_HOME" --strip=1 -xf "$CACHE_DIR_SDK/$SDK_FILE"
-          cd "$SDK_HOME"
-          test -d "dl" && rm -rf "dl" || true
-          test -d "feeds" && rm -rf "feeds" || true
-          ln -s "$CACHE_DIR_DL" "dl"
-          ln -s "$CACHE_DIR_FEEDS" "feeds"
-          cp feeds.conf.default feeds.conf
-          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
-          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
-          cd -
+          
+          echo "Found SDK file: ${SDK_FILE}"
+          curl -sL "${BASE_URL}/${SDK_FILE}" -o "$SDK_FILE"
+          
+          tar -C "$SDK_HOME" --strip-components=1 -xf "$SDK_FILE"
+          rm -f "$SDK_FILE" sha256sums
 
-      - name: Update Feeds & Inject Xray Slimming
+      - name: Update Feeds & Prepare Packages
         run: |
           cd "$SDK_HOME"
           ./scripts/feeds update -a
+          
+          # 將目前倉庫 (luci-app-xray) 放入 package 目錄
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
           ./scripts/feeds install -a
           
-          # 注入 UPX 瘦身到 xray-core Makefile
+          # 清理會干擾編譯的無用套件 (避免 Docker/dockerd 報錯)
+          rm -rf feeds/packages/utils/dockerd
+          rm -rf feeds/packages/utils/docker
+          rm -rf feeds/packages/utils/containerd
+          
+          # 注入 UPX 瘦身邏輯到 xray-core 的 Makefile
           XRAY_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
-              echo "[+] Force UPX Slimming on: $xmk"
+              echo "[+] Injecting UPX slimming to: $xmk"
               if ! grep -q "upx --fast" "$xmk"; then
                   sed -i '/define Build\/Compile/a \	upx --fast $(PKG_BUILD_DIR)/xray || true' "$xmk"
               fi
           done
-          cd -
 
-      - name: Build Packages
+      - name: Build APK Packages
         run: |
           cd "$SDK_HOME"
           make defconfig
-          # 同時編譯 luci-app-xray 與 xray-core
-          make package/${PACKAGE_NAME}/compile V=s
-          make package/xray-core/compile V=s || true
-          find "$SDK_HOME/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
-          cd -
+          
+          # 僅編譯 luci-app-xray 與 xray-core
+          make package/${PACKAGE_NAME}/compile V=s -i || true
+          make package/xray-core/compile V=s -i || true
+          
+          echo "=== Compiled APK Files ==="
+          find "$SDK_HOME/bin/" -type f -name "*.apk" -exec ls -lh {} \;
 
-      - name: Copy Bin Files
+      - name: Collect Artifacts
         run: |
-          # 提取 luci-app-xray 與 瘦身後的 xray-core
-          find "$SDK_HOME/bin/" -type f \( -name "*xray*.ipk" -o -name "*xray*.apk" \) | while read -r f; do
+          mkdir -p "${{ github.workspace }}/output"
+          find "$SDK_HOME/bin/" -type f -name "*.apk" | while read -r f; do
             base="$(basename "$f")"
-            cp "$f" "${{ github.workspace }}/${base%.*}-${{ matrix.id }}-${{ matrix.arch }}.${base##*.}"
+            cp "$f" "${{ github.workspace }}/output/${base%.*}-${{ matrix.id }}.${base##*.}"
           done
-          find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
+          ls -lh "${{ github.workspace }}/output"
 
-      - name: Generate Tag Name for Manual Run
+      - name: Generate Tag Name
         id: tag_gen
         run: |
           if [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
-            echo "TAG_NAME=v$(date +'%Y.%m.%d-%H%M')-build" >> $GITHUB_ENV
+            echo "tag_name=v$(date +'%Y.%m.%d-%H%M')-snapshot" >> $GITHUB_OUTPUT
           fi
 
-      - name: Release and Upload Assets
+      - name: Release APK Assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: "Release ${{ env.TAG_NAME }}"
-          files: |
-            *.ipk
-            *.apk
+          tag_name: ${{ steps.tag_gen.outputs.tag_name }}
+          name: "ImmortalWrt SNAPSHOT APK Release ${{ steps.tag_gen.outputs.tag_name }}"
+          files: output/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
