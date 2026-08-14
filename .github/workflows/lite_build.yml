@@ -1,47 +1,42 @@
-name: Build APK for ZN M2 & x86_64 (ImmortalWrt)
+name: Build Xray APK Packages for ImmortalWrt SNAPSHOT
 
 on:
   push:
     tags:
       - "*"
   workflow_dispatch:
-  
+
 permissions:
   contents: write
-  
-env:
-  PACKAGE_NAME: luci-app-xray
-  CACHE_DIR: ~/cache
 
 jobs:
-  release:
+  build:
     name: Build APK (${{ matrix.id }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ZN M2 (qualcommax/ipq60xx) - ImmortalWrt SNAPSHOT (APK)
+          # 中興 ZN M2 (qualcommax/ipq60xx) - ImmortalWrt SNAPSHOT
           - id: immortalwrt-ipq60xx
             arch: aarch64_cortex-a53
             base_url: https://downloads.immortalwrt.org/snapshots/targets/qualcommax/ipq60xx
-          # x86_64 - ImmortalWrt SNAPSHOT (APK)
+          # x86_64 - ImmortalWrt SNAPSHOT
           - id: immortalwrt-x86_64
             arch: x86_64
             base_url: https://downloads.immortalwrt.org/snapshots/targets/x86/64
 
-    env:
-      CCACHE_DIR: ~/.ccache
-      CONFIG_CCACHE: y
-
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies & UPX
+      - name: Install Build Dependencies & Tools
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc zstd upx-ucl curl
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3-setuptools rsync \
+            swig unzip zlib1g-dev file wget curl zstd upx-ucl zip xsltproc
 
       - name: Download & Extract ImmortalWrt SDK
         run: |
@@ -52,116 +47,99 @@ jobs:
           echo "Fetching sha256sums from ${BASE_URL}..."
           curl -sL "${BASE_URL}/sha256sums" -o sha256sums
           
-          # 動態匹配包含 -sdk- 的完整檔案名稱 (支持 .tar.xz / .tar.zst)
-          SDK_FILE=$(grep -oE "immortalwrt-sdk-[^ ]+\.tar\.(xz|zst)" sha256sums | head -n 1)
+          # 動態匹配 SDK 檔案 (.tar.zst 或 .tar.xz)
+          SDK_FILE=$(grep -oE "(immortalwrt|openwrt)-sdk-[^ ]+\.tar\.(xz|zst)" sha256sums | head -n 1)
           if [ -z "$SDK_FILE" ]; then
-            # 若 ImmortalWrt 命名格式不同，降級搜尋 openwrt-sdk
-            SDK_FILE=$(grep -oE "openwrt-sdk-[^ ]+\.tar\.(xz|zst)" sha256sums | head -n 1)
-          fi
-          
-          if [ -z "$SDK_FILE" ]; then
-            echo "::error::Cannot find SDK file in sha256sums at ${BASE_URL}"
+            echo "::error::Cannot find SDK file in sha256sums!"
             exit 1
           fi
           
-          echo "Found SDK file: ${SDK_FILE}"
+          echo "Found SDK: ${SDK_FILE}"
           curl -sL "${BASE_URL}/${SDK_FILE}" -o "$SDK_FILE"
-          
           tar -C "$SDK_HOME" --strip-components=1 -xf "$SDK_FILE"
           rm -f "$SDK_FILE" sha256sums
 
-      - name: Update Feeds & Prepare Packages
+      - name: Setup Feeds, GeoData & Clone Chinese i18n
         run: |
           cd "$SDK_HOME"
           
-          # 1. 更新 Feeds 并清理可能冲突的同名包
+          # 1. 依照官方指南：將 luci-app-xray 加入 feeds.conf.default
+          echo "src-git-full luci_app_xray https://github.com/yichya/luci-app-xray" >> feeds.conf.default
+          
+          # 2. 更新 feeds 列表
           ./scripts/feeds update -a
-          rm -rf feeds/luci/applications/luci-app-xray
-          rm -rf feeds/packages/net/luci-app-xray
           
-          # 2. 拷贝源码到 package/luci-app-xray
-          rm -rf "package/$PACKAGE_NAME"
-          mkdir -p "package/$PACKAGE_NAME"
-          cp -r "${{ github.workspace }}"/* "package/$PACKAGE_NAME/"
+          # 3. 安裝 luci-app-xray、status 狀態組件及 GeoData 數據庫
+          ./scripts/feeds install luci-app-xray luci-app-xray-status
+          ./scripts/feeds install v2ray-geoip v2ray-geosite || ./scripts/feeds install geodata
           
-          # 3. 检查并纠正 Makefile 嵌套路径（关键修复！）
-          if [ ! -f "package/$PACKAGE_NAME/Makefile" ] && [ -f "package/$PACKAGE_NAME/applications/luci-app-xray/Makefile" ]; then
-              echo "[+] 检测到子目录嵌套，正在平铺 Makefile 结构..."
-              cp -r package/$PACKAGE_NAME/applications/luci-app-xray/* package/$PACKAGE_NAME/
-          fi
-          
-          # 确认 Makefile 位置
-          if [ -f "package/$PACKAGE_NAME/Makefile" ]; then
-              echo "✅ 成功确认 package/$PACKAGE_NAME/Makefile 存在！"
-          else
-              echo "❌ 警告: package/$PACKAGE_NAME/ 目录下未找到 Makefile，请检查仓库结构！"
-              ls -la "package/$PACKAGE_NAME/"
-          fi
-          
-          # 4. 安装 Feeds & 清理 Docker 冲突
+          # 4. 拉取中文語言包 Repo 並安裝
+          git clone -b main --depth=1 https://github.com/htcnokia/luci-i18n-xray-zh-cn package/luci-i18n-xray-zh-cn
           ./scripts/feeds install -a
-          rm -rf feeds/packages/utils/dockerd
-          rm -rf feeds/packages/utils/docker
-          rm -rf feeds/packages/utils/containerd
+          
+          # 5. 清理潛在的 Docker 依賴衝突
+          rm -rf feeds/packages/utils/dockerd feeds/packages/utils/docker feeds/packages/utils/containerd
 
-          # 5. 注入 UPX 瘦身到 xray-core
+          # 6. 注入 UPX 瘦身指令到 xray-core Makefile
           XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
-              echo "[+] 注入 UPX 到: $xmk"
+              echo "[+] 注入 UPX 瘦身到: $xmk"
               if ! grep -q "upx --fast" "$xmk"; then
                   sed -i '/define Build\/Compile/a \	upx --fast $(PKG_BUILD_DIR)/xray || true' "$xmk"
               fi
           done
-          
-      - name: Build APK Packages
+
+      - name: Build All APK Packages
         run: |
           cd "$SDK_HOME"
           
-          # 1. 写入配置并刷新
-          echo "CONFIG_PACKAGE_luci-app-xray=m" > .config
-          echo "CONFIG_PACKAGE_xray-core=m" >> .config
+          # 寫入私有編譯配置 (=m 代表編譯為獨立套件包)
+          echo "CONFIG_PACKAGE_xray-core=m" > .config
+          echo "CONFIG_PACKAGE_luci-app-xray=m" >> .config
+          echo "CONFIG_PACKAGE_luci-app-xray-status=m" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-xray-zh-cn=m" >> .config
+          echo "CONFIG_PACKAGE_v2ray-geoip=m" >> .config
+          echo "CONFIG_PACKAGE_v2ray-geosite=m" >> .config
+          
           make defconfig
           
-          # 2. 编译 xray-core
-          echo "=== 开始编译 xray-core ==="
-          make package/xray-core/compile V=s
+          # 開始編譯所有目標套件
+          echo "=== 開始編譯目標套件 ==="
+          make package/feeds/luci_app_xray/luci-app-xray/compile V=s
+          make package/luci-i18n-xray-zh-cn/compile V=s || true
+          make package/feeds/packages/v2ray-geoip/compile V=s || true
+          make package/feeds/packages/v2ray-geosite/compile V=s || true
           
-          # 3. 编译 luci-app-xray
-          echo "=== 开始编译 luci-app-xray ==="
-          make package/$PACKAGE_NAME/compile V=s
-          
-          # 4. 补刀 UPX 瘦身（如果在 build_dir 找到二进位）
+          # 補刀二次強效 UPX 壓縮，確保二進位體積最小
           find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
-              echo "[+] 补刀 UPX 瘦身: $xbin"
+              echo "[+] 補刀 UPX 壓縮: $xbin"
               upx --fast "$xbin" || true
           done
           
-          echo "=== 检查 SDK bin 目录下编译出的所有 APK ==="
+          echo "=== 編譯產出的所有 APK 檔案 ==="
           find bin/ -type f -name "*.apk" -exec ls -lh {} \;
 
-
-      - name: Collect and Zip Artifacts
+      - name: Collect & Package Artifacts
         run: |
           mkdir -p "${{ github.workspace }}/output"
           
-          # 1. 建立一個臨時目錄存放當前架構的所有 apk
           ARCH_DIR="${{ github.workspace }}/xray-apk-${{ matrix.id }}"
           mkdir -p "$ARCH_DIR"
           
-          # 2. 複製所有 apk 到該目錄
+          # 收集 bin 目錄下編譯出來的所有 .apk 檔案
           find "$SDK_HOME/bin/" -type f -name "*.apk" -exec cp {} "$ARCH_DIR/" \;
           
-          # 3. 將整個目錄打包成 ZIP 壓縮檔
+          # 打包為完整 ZIP 壓縮檔（便於一鍵下載上傳）
           cd "${{ github.workspace }}"
           zip -r "output/xray-apk-packages-${{ matrix.id }}.zip" "xray-apk-${{ matrix.id }}"
           
-          # 4. 同時單獨複製一份 luci-app-xray 和 xray-core 的 apk 出來 (方便想單獨下載的人)
-          find "$ARCH_DIR" -type f \( -name "luci-app-xray*.apk" -o -name "xray-core*.apk" \) | while read -r f; do
+          # 複製核心 APK 至 output 根目錄方便單獨下載
+          find "$ARCH_DIR" -type f \( -name "luci-app-xray*.apk" -o -name "xray-core*.apk" -o -name "*zh-cn*.apk" -o -name "*geoip*.apk" -o -name "*geosite*.apk" \) | while read -r f; do
             base="$(basename "$f")"
             cp "$f" "${{ github.workspace }}/output/${base%.*}-${{ matrix.id }}.${base##*.}"
           done
           
-          echo "=== 最終輸出的打包檔案 ==="
+          echo "=== 最終輸出檔案清單 ==="
           ls -lh "${{ github.workspace }}/output"
 
       - name: Generate Tag Name
@@ -173,15 +151,13 @@ jobs:
             echo "tag_name=v$(date +'%Y.%m.%d-%H%M')-snapshot" >> $GITHUB_OUTPUT
           fi
 
-      - name: Release APK Assets
+      - name: Publish Release Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag_gen.outputs.tag_name }}
-          name: "ImmortalWrt SNAPSHOT APK Release ${{ steps.tag_gen.outputs.tag_name }}"
-          # 這裡只發布 zip 包和核心 apk
+          name: "ImmortalWrt SNAPSHOT Xray APK Release ${{ steps.tag_gen.outputs.tag_name }}"
           files: |
             output/*.zip
-            output/luci-app-xray*.apk
-            output/xray-core*.apk
+            output/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
