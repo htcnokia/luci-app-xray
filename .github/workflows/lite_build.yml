@@ -69,15 +69,16 @@ jobs:
           # 2. 更新 feeds 列表
           ./scripts/feeds update -a
           
-          # 3. 🔥 關鍵修復：刪除引發 循環依賴 (recursive dependency) 的 asterisk 相關套件
+          # 3. 刪除引發 循環依賴 (recursive dependency) 的 asterisk 相關套件
           rm -rf feeds/telephony/net/asterisk*
           rm -rf feeds/packages/net/asterisk*
           
-          # 4. 安裝 luci-app-xray、status 狀態組件及 GeoData 數據庫
+          # 4. 安裝所有需求套件到 package/ 索引中
+          ./scripts/feeds install -a -p luci_app_xray
           ./scripts/feeds install luci-app-xray luci-app-xray-status
           ./scripts/feeds install v2ray-geoip v2ray-geosite || ./scripts/feeds install geodata || true
           
-          # 5. 拉取中文語言包 Repo 並安裝
+          # 5. 拉取中文語言包 Repo
           git clone -b main --depth=1 https://github.com/htcnokia/luci-i18n-xray-zh-cn package/luci-i18n-xray-zh-cn
           
           # 6. 清理潛在的 Docker 依賴衝突
@@ -104,17 +105,12 @@ jobs:
           echo "CONFIG_PACKAGE_v2ray-geoip=m" >> .config
           echo "CONFIG_PACKAGE_v2ray-geosite=m" >> .config
           
-          # 執行 defconfig 刷新配置
+          # 執行 defconfig 刷新配置，生成完整的 .config 檔案
           make defconfig
           
-          # 開始編譯所有目標套件
+          # 開始編譯：直接執行全局 package compile，SDK 會自動尋找 .config 中標記為 =m 的套件
           echo "=== 開始編譯目標套件 ==="
-          
-          # 使用 make package/.../compile 的全域搜尋機制，避免路徑匹配失誤
-          make package/luci-app-xray/compile V=s || make package/feeds/luci_app_xray/luci-app-xray/compile V=s
-          make package/luci-i18n-xray-zh-cn/compile V=s || true
-          make package/v2ray-geoip/compile V=s || true
-          make package/v2ray-geosite/compile V=s || true
+          make package/compile V=s IGNORE_ERRORS=m -j$(nproc)
           
           # 補刀二次強效 UPX 壓縮，確保二進位體積最小
           find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
