@@ -1,0 +1,155 @@
+name: Build and Release for ZN M2
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+env:
+  PACKAGE_NAME: luci-app-xray
+  CACHE_DIR: ~/cache
+
+jobs:
+  release:
+    name: Build for ${{ matrix.arch }} (${{ matrix.id }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ZN M2 (IPQ60xx) 專屬 OpenWrt 23.05 SDK
+          - id: 23.05-ipq60xx
+            arch: aarch64_cortex-a53
+            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/qualcommax/ipq60xx
+            sdk_name: -sdk-23.05.5-qualcommax-ipq60xx_
+          # ZN M2 (IPQ60xx) 專屬 OpenWrt 25.12 SDK (最新版)
+          - id: 25.12-ipq60xx
+            arch: aarch64_cortex-a53
+            sdk_url_path: https://downloads.openwrt.org/releases/25.12.2/targets/qualcommax/ipq60xx
+            sdk_name: -sdk-25.12.2-qualcommax-ipq60xx_
+
+    env:
+      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
+      SDK_NAME: ${{ matrix.sdk_name }}
+      CCACHE_DIR: ~/.ccache
+      CONFIG_CCACHE: y
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Cache Key
+        id: cache_key
+        run: echo "timestamp=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_DIR }}
+            ${{ env.CCACHE_DIR }}
+          key: openwrt-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
+          restore-keys: |
+            openwrt-${{ matrix.arch }}-${{ matrix.id }}-${{ env.PACKAGE_NAME }}-
+
+      - name: Install Dependencies & UPX
+        run: |
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc zstd upx-ucl
+
+      - name: Create Directories
+        run: |
+          CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
+          CACHE_DIR_DL="$(eval echo "$CACHE_DIR/dl")"
+          CACHE_DIR_FEEDS="$(eval echo "$CACHE_DIR/feeds")"
+          mkdir -p "$CACHE_DIR_SDK" "$CACHE_DIR_DL" "$CACHE_DIR_FEEDS"
+          echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
+          echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
+          echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
+          echo "SDK_HOME=$(mktemp -d)" >> $GITHUB_ENV
+
+      - name: Download and Unzip SDK
+        run: |
+          cd "$CACHE_DIR_SDK"
+          if ! ( wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -- "$SDK_NAME" > sha256sums.small 2>/dev/null ) ; then
+            echo "::error::Can not find ${SDK_NAME} file in sha256sums."
+            exit 1
+          fi
+          SDK_FILE="$(cat sha256sums.small | cut -d' ' -f2 | sed 's/*//g')"
+          if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
+            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
+            if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
+              echo "::error::SDK can not be verified!"
+              exit 1
+            fi
+          fi
+          cd -
+          tar -C "$SDK_HOME" --strip=1 -xf "$CACHE_DIR_SDK/$SDK_FILE"
+          cd "$SDK_HOME"
+          test -d "dl" && rm -rf "dl" || true
+          test -d "feeds" && rm -rf "feeds" || true
+          ln -s "$CACHE_DIR_DL" "dl"
+          ln -s "$CACHE_DIR_FEEDS" "feeds"
+          cp feeds.conf.default feeds.conf
+          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
+          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
+          cd -
+
+      - name: Update Feeds & Inject Xray Slimming
+        run: |
+          cd "$SDK_HOME"
+          ./scripts/feeds update -a
+          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          ./scripts/feeds install -a
+          
+          # 注入 UPX 瘦身到 xray-core Makefile
+          XRAY_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/xray-core/*")
+          for xmk in $XRAY_MAKEFILES; do
+              echo "[+] Force UPX Slimming on: $xmk"
+              if ! grep -q "upx --fast" "$xmk"; then
+                  sed -i '/define Build\/Compile/a \	upx --fast $(PKG_BUILD_DIR)/xray || true' "$xmk"
+              fi
+          done
+          cd -
+
+      - name: Build Packages
+        run: |
+          cd "$SDK_HOME"
+          make defconfig
+          # 同時編譯 luci-app-xray 與 xray-core
+          make package/${PACKAGE_NAME}/compile V=s
+          make package/xray-core/compile V=s || true
+          find "$SDK_HOME/bin/" -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
+          cd -
+
+      - name: Copy Bin Files
+        run: |
+          # 提取 luci-app-xray 與 瘦身後的 xray-core
+          find "$SDK_HOME/bin/" -type f \( -name "*xray*.ipk" -o -name "*xray*.apk" \) | while read -r f; do
+            base="$(basename "$f")"
+            cp "$f" "${{ github.workspace }}/${base%.*}-${{ matrix.id }}-${{ matrix.arch }}.${base##*.}"
+          done
+          find "${{ github.workspace }}" -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -exec ls -lh {} \;
+
+      - name: Generate Tag Name for Manual Run
+        id: tag_gen
+        run: |
+          if [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+          else
+            echo "TAG_NAME=v$(date +'%Y.%m.%d-%H%M')-build" >> $GITHUB_ENV
+          fi
+
+      - name: Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: "Release ${{ env.TAG_NAME }}"
+          files: |
+            *.ipk
+            *.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
