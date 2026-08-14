@@ -101,10 +101,20 @@ jobs:
           cd "$SDK_HOME"
           make defconfig
           
-          # 僅編譯 luci-app-xray 與 xray-core
+          # 1. 正常編譯套件
           make package/${PACKAGE_NAME}/compile V=s -i || true
           make package/xray-core/compile V=s -i || true
           
+          # 2. 強效 UPX 瘦身：尋找 SDK 編譯出來的所有 xray 二進位檔並直接壓縮
+          echo "=== 正在執行強效 UPX 瘦身 ==="
+          find build_dir/ staging_dir/ -type f -name "xray" -perm -111 2>/dev/null | while read -r xbin; do
+              echo "[+] 發現 Xray 二進位檔: $xbin"
+              upx --fast --force-macos "$xbin" || upx --fast "$xbin" || true
+          done
+          
+          # 3. 重新打包/更新 APK（如果 SDK 支援）或者二次觸發打包
+          make package/xray-core/compile V=s -i || true
+
           echo "=== Compiled APK Files ==="
           find "$SDK_HOME/bin/" -type f -name "*.apk" -exec ls -lh {} \;
 
