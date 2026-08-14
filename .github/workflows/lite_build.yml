@@ -84,15 +84,18 @@ jobs:
           rm -rf feeds/packages/utils/docker
           rm -rf feeds/packages/utils/containerd
           
-          # 注入 UPX 瘦身邏輯到 xray-core 的 Makefile
-          XRAY_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/xray-core/*")
+          # 1. 搜尋 feeds 與 package 目錄下所有的 xray-core Makefile
+          XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
+          
+          # 2. 注入 UPX 瘦身指令
           for xmk in $XRAY_MAKEFILES; do
-              echo "[+] Injecting UPX slimming to: $xmk"
+              echo "[+] 找到 xray-core Makefile: $xmk"
               if ! grep -q "upx --fast" "$xmk"; then
                   sed -i '/define Build\/Compile/a \	upx --fast $(PKG_BUILD_DIR)/xray || true' "$xmk"
+                  echo "[+] 成功注入 UPX 壓縮指令！"
               fi
           done
-
+          
       - name: Build APK Packages
         run: |
           cd "$SDK_HOME"
@@ -108,10 +111,12 @@ jobs:
       - name: Collect Artifacts
         run: |
           mkdir -p "${{ github.workspace }}/output"
+          # 遞迴搜尋所有產出的 .apk 檔並複製出來，同時加上架構標籤
           find "$SDK_HOME/bin/" -type f -name "*.apk" | while read -r f; do
             base="$(basename "$f")"
             cp "$f" "${{ github.workspace }}/output/${base%.*}-${{ matrix.id }}.${base##*.}"
           done
+          echo "=== All Output APKs ==="
           ls -lh "${{ github.workspace }}/output"
 
       - name: Generate Tag Name
