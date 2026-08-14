@@ -75,24 +75,26 @@ jobs:
           cd "$SDK_HOME"
           ./scripts/feeds update -a
           
-          # 將目前倉庫 (luci-app-xray) 放入 package 目錄
+          # 1. 將目前倉庫 (luci-app-xray) 放入 package 目錄
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
           ./scripts/feeds install -a
           
-          # 清理會干擾編譯的無用套件 (避免 Docker/dockerd 報錯)
+          # 2. 清理會干擾編譯的無用套件 (避免 Docker/dockerd 報錯)
           rm -rf feeds/packages/utils/dockerd
           rm -rf feeds/packages/utils/docker
           rm -rf feeds/packages/utils/containerd
           
-          # 1. 搜尋 feeds 與 package 目錄下所有的 xray-core Makefile
-          XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
+          # 3. 🔥 關鍵修復：強制在 .config 中啟用 luci-app-xray 與 xray-core 的編譯選項！
+          echo "CONFIG_PACKAGE_luci-app-xray=m" >> .config
+          echo "CONFIG_PACKAGE_xray-core=m" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-xray-zh-cn=m" >> .config || true
           
-          # 2. 注入 UPX 瘦身指令
+          # 4. 搜尋並注入 UPX 瘦身指令到 xray-core
+          XRAY_MAKEFILES=$(find . -type f -name "Makefile" -path "*/xray-core/*")
           for xmk in $XRAY_MAKEFILES; do
-              echo "[+] 找到 xray-core Makefile: $xmk"
+              echo "[+] 注入 UPX 到: $xmk"
               if ! grep -q "upx --fast" "$xmk"; then
                   sed -i '/define Build\/Compile/a \	upx --fast $(PKG_BUILD_DIR)/xray || true' "$xmk"
-                  echo "[+] 成功注入 UPX 壓縮指令！"
               fi
           done
           
