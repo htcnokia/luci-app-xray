@@ -128,20 +128,27 @@ jobs:
           ARCH_DIR="${{ github.workspace }}/xray-apk-${{ matrix.id }}"
           mkdir -p "$ARCH_DIR"
           
-          # 收集 bin 目錄下編譯出來的所有 .apk 檔案
-          find "$SDK_HOME/bin/" -type f -name "*.apk" -exec cp {} "$ARCH_DIR/" \;
+          # 1. 強力遞迴搜尋 SDK bin/ 目錄下「所有」產出的 .apk 檔並複製過來
+          find "$SDK_HOME/bin/" -type f -name "*.apk" -exec cp -f {} "$ARCH_DIR/" \;
           
-          # 打包為完整 ZIP 壓縮檔（便於一鍵下載上傳）
+          # 2. 印出收集到的所有 APK 清單，方便在 Action 日誌中快速確認
+          echo "=== 收集到的完整 APK 清單 ==="
+          ls -lh "$ARCH_DIR"
+          
+          # 3. 打包為完整 ZIP 壓縮檔
           cd "${{ github.workspace }}"
           zip -r "output/xray-apk-packages-${{ matrix.id }}.zip" "xray-apk-${{ matrix.id }}"
           
-          # 複製核心 APK 至 output 根目錄方便單獨下載
-          find "$ARCH_DIR" -type f \( -name "luci-app-xray*.apk" -o -name "xray-core*.apk" -o -name "*zh-cn*.apk" -o -name "*geoip*.apk" -o -name "*geosite*.apk" \) | while read -r f; do
-            base="$(basename "$f")"
-            cp "$f" "${{ github.workspace }}/output/${base%.*}-${{ matrix.id }}.${base##*.}"
-          done
+          # 4. 提取關鍵的核心 APK 到 output 根目錄，供單獨下載
+          find "$ARCH_DIR" -type f \( \
+            -name "luci-app-xray*.apk" -o \
+            -name "xray-core*.apk" -o \
+            -name "*zh-cn*.apk" -o \
+            -name "*geoip*.apk" -o \
+            -name "*geosite*.apk" \
+          \) -exec cp -f {} "${{ github.workspace }}/output/" \;
           
-          echo "=== 最終輸出檔案清單 ==="
+          echo "=== 最終輸出至 Release 的檔案 ==="
           ls -lh "${{ github.workspace }}/output"
 
       - name: Generate Tag Name
